@@ -15,6 +15,7 @@ from mathutils import Matrix
 from blenderproc.python.types.MeshObjectUtility import MeshObject
 from blenderproc.python.writer.WriterUtility import _WriterUtility
 
+
 def binary_mask_to_rle(binary_mask: np.ndarray, bbox: List[int]) -> List[int]:
     """Converts a binary mask to COCOs run-length encoding (RLE) format. Instead of outputting
     a mask image, you give a list of start pixels and how many pixels after each of those
@@ -88,7 +89,7 @@ def write_flink(output_dir: str,
                 depths: Optional[List[np.ndarray]] = None, colors: Optional[List[np.ndarray]] = None,
                 color_file_format: str = "PNG", dataset: str = "",
                 jpg_quality: int = 95,
-                camera_id: str = "CAMID") -> None:
+                camera_id: str = "CAMID", tags: List[str] | List[List[str]] = []) -> None:
     """ Writes images, depth maps, labels and metadata in the Flink dataset format.
 
     :param output_dir: Path to the output directory.
@@ -98,7 +99,31 @@ def write_flink(output_dir: str,
     :param dataset: Name of the dataset. Used as a subdirectory name.
     :param jpg_quality: JPEG quality if color_file_format is "JPEG".
     :param camera_id: Camera ID prefix for filenames.
+    :param tags: List of tags to add to the metadata. Can be a single list of tags or a list of lists of tags. If it is a list of lists, each list should correspond to a frame. If it is a single list, the same tags will be added to all frames.
     """
+    # check data conformity
+    assert len(instance_attribute_maps) == len(
+        instance_segmaps), "instance_attribute_maps and instance_segmaps must have the same length."
+    assert isinstance(
+        tags, list), "Tags must be a list of lists or a single list."
+    if len(tags) > 0:
+        if isinstance(tags[0], list):
+            # tags is a list of lists
+            assert len(tags) == len(
+                instance_segmaps), "Tags and instance_segmaps must have the same length."
+        else:
+            # tags is a single list
+            tags = [tags] * len(instance_segmaps)
+    else:
+        tags = [[]] * len(instance_segmaps)
+
+    if depths is not None:
+        assert len(depths) == len(
+            instance_segmaps), "Depths and instance_segmaps must have the same length."
+    if colors is not None:
+        assert len(colors) == len(
+            instance_segmaps), "Colors and instance_segmaps must have the same length."
+
     # Create output directories
     dataset_dir: Path = Path(output_dir) / \
         dataset if dataset else Path(output_dir)
@@ -160,7 +185,7 @@ def write_flink(output_dir: str,
             cv2.imwrite(depth_path, depth_mm)
 
         # Generate and save metadata
-        metadata = _FlinkWriterUtility.get_frame_metadata()
+        metadata = _FlinkWriterUtility.get_frame_metadata(tags[frame_id])
         metadata_path = os.path.join(
             dataset_dir, 'metadata', f"{filename_stem}.json")
         _FlinkWriterUtility.write_json(metadata_path, metadata)
@@ -186,9 +211,10 @@ class _FlinkWriterUtility:
             json.dump(content, f, indent=2)
 
     @staticmethod
-    def get_frame_metadata() -> Dict[str, Any]:
+    def get_frame_metadata(tags: List[str]) -> Dict[str, Any]:
         """Generates metadata for the current frame according to the Flink schema.
 
+        :param tags: List of tags to add to the metadata.
         :return: Dictionary containing camera metadata.
         """
         cam_K = _WriterUtility.get_cam_attribute(
@@ -212,7 +238,7 @@ class _FlinkWriterUtility:
                 "camera_matrix": cam_matrix,
                 "position": position,
                 "rotation": rotation,
-                "tags": []  # Optional tags can be added here
+                "tags": tags
             }
         }
 
