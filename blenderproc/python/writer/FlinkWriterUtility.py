@@ -16,9 +16,90 @@ from bpy_extras.object_utils import world_to_camera_view
 from blenderproc.python.types.MeshObjectUtility import MeshObject
 from blenderproc.python.writer.WriterUtility import _WriterUtility
 
-# https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
+
+class HideMeshWithProperty:
+    """Context manager that temporarily hides all objects without a 'obj_id' attribute.
+
+    Args:
+        scene_objects (List[MeshObject]): The list of objects to hide.
+        property_name (str): The name of the property to check.
+        inverse (bool, optional): If True, hide objects that have the property. Defaults to False.
+        DEBUG (bool, optional): If True, print debug information. Defaults to False.
+
+    Example:
+        ```python
+        with HideMeshWithProperty():
+            # Only objects with obj_id will be visible here
+            # Perform operations on visible objects
+        # All objects are restored to their original visibility state here
+        ```
+    """
+
+    def __init__(self, scene_objects: List[MeshObject], property_name: str, inverse: bool = False, DEBUG: bool = False):
+        """Initialize the context manager."""
+        self.scene_objects = scene_objects
+        self.hidden_objects: List[MeshObject] = []
+        self.property_name = property_name
+        self.inverse = inverse
+        self.DEBUG = DEBUG
+
+    def __enter__(self) -> 'HideMeshWithProperty':
+        """Hide all objects without a 'obj_id' attribute.
+
+        Returns:
+            HideMeshWithProperty: The context manager instance.
+        """
+        # Store and hide objects that don't have the obj_id attribute
+        for obj in self.scene_objects:
+            if obj.has_cp(self.property_name) != self.inverse:
+                self.hidden_objects.append(obj)
+                obj.blender_obj.hide_render = True
+                obj.blender_obj.hide_viewport = True
+                if self.DEBUG:
+                    print(
+                        f"Hiding object {obj.blender_obj.name}, property {self.property_name}: {obj.has_cp(self.property_name)}, inverse: {self.inverse}")
+
+        return self
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
+        """Restore the original visibility state of all hidden objects.
+
+        Args:
+            exc_type: The exception type if an exception was raised in the context.
+            exc_val: The exception value if an exception was raised in the context.
+            exc_tb: The traceback if an exception was raised in the context.
+        """
+        # Restore visibility of hidden objects
+        for obj in self.hidden_objects:
+            obj.blender_obj.hide_render = False
+            obj.blender_obj.hide_viewport = False
+            if self.DEBUG:
+                print(f"Restoring visibility of object {obj.blender_obj.name}")
+
+
+class AuxiliaryCube:
+    """Context manager that adds an auxiliary cube to the scene."""
+
+    def __init__(self, location: Vector, scale: Vector):
+        self.location = location
+        self.scale = scale
+        self.cube = None
+
+    def __enter__(self) -> bpy.types.Object:
+        """Add an auxiliary cube to the scene."""
+        bpy.ops.mesh.primitive_cube_add(
+            location=self.location, scale=self.scale)
+        self.cube = bpy.context.object
+        return self.cube
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
+        """Remove the auxiliary cube from the scene."""
+        bpy.data.objects.remove(self.cube, do_unlink=True)
+
+
 def is_ray_hit_vertex(vtx: Vector, ray_origin: Vector, ray_direction: Vector, helper_cube_scale: float = 0.0001, DEBUG: bool = False) -> bool:
     """Checks if a vertex is occluded by objects in the scene w.r.t. a given ray.
+    https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
 
     Args:
         vtx (Vector): the world space x, y and z coordinates of the vertex.
@@ -100,85 +181,6 @@ def is_object_all_visible(obj: bpy.types.Object, DEBUG: bool = False) -> bool:
     return True
 
 
-class HideMeshWithProperty:
-    """Context manager that temporarily hides all objects without a 'flink_obj_id' attribute.
-
-    Args:
-        property_name (str): The name of the property to check.
-        inverse (bool, optional): If True, hide objects that have the property. Defaults to False.
-        DEBUG (bool, optional): If True, print debug information. Defaults to False.
-
-    Example:
-        ```python
-        with HideMeshWithProperty():
-            # Only objects with flink_obj_id will be visible here
-            # Perform operations on visible objects
-        # All objects are restored to their original visibility state here
-        ```
-    """
-
-    def __init__(self, property_name: str, inverse: bool = False, DEBUG: bool = False):
-        """Initialize the context manager."""
-        self.hidden_objects = []
-        self.property_name = property_name
-        self.inverse = inverse
-        self.DEBUG = DEBUG
-
-    def __enter__(self) -> 'HideMeshWithProperty':
-        """Hide all objects without a 'flink_obj_id' attribute.
-
-        Returns:
-            HideMeshWithProperty: The context manager instance.
-        """
-        # Store and hide objects that don't have the flink_obj_id attribute
-        for obj in bpy.context.scene.objects:
-            if obj.type == 'MESH' and not obj.hide_render:
-                if (self.property_name in obj.data) != self.inverse:
-                    self.hidden_objects.append(obj)
-                    obj.hide_render = True
-                    obj.hide_viewport = True
-                    if self.DEBUG:
-                        print(
-                            f"Hiding object {obj.name}, property {self.property_name}: {self.property_name in obj.data}, inverse: {self.inverse}")
-
-        return self
-
-    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
-        """Restore the original visibility state of all hidden objects.
-
-        Args:
-            exc_type: The exception type if an exception was raised in the context.
-            exc_val: The exception value if an exception was raised in the context.
-            exc_tb: The traceback if an exception was raised in the context.
-        """
-        # Restore visibility of hidden objects
-        for obj in self.hidden_objects:
-            obj.hide_render = False
-            obj.hide_viewport = False
-            if self.DEBUG:
-                print(f"Restoring visibility of object {obj.name}")
-
-
-class AuxiliaryCube:
-    """Context manager that adds an auxiliary cube to the scene."""
-
-    def __init__(self, location: Vector, scale: Vector):
-        self.location = location
-        self.scale = scale
-        self.cube = None
-
-    def __enter__(self) -> bpy.types.Object:
-        """Add an auxiliary cube to the scene."""
-        bpy.ops.mesh.primitive_cube_add(
-            location=self.location, scale=self.scale)
-        self.cube = bpy.context.object
-        return self.cube
-
-    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
-        """Remove the auxiliary cube from the scene."""
-        bpy.data.objects.remove(self.cube, do_unlink=True)
-
-# https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
 def is_ray_hit_obj(vtx: Vector, ray_origin: Vector, ray_direction: Vector, helper_cube_scale: float = 0.0001, DEBUG: bool = False) -> bool:
     """Checks if a vertex is occluded by objects in the scene w.r.t. a given ray.
 
@@ -200,7 +202,7 @@ def is_ray_hit_obj(vtx: Vector, ray_origin: Vector, ray_direction: Vector, helpe
     # as the ray_cast is not always accurate
     # cf https://blender.stackexchange.com/a/87755
     with AuxiliaryCube(location=vtx, scale=(
-        helper_cube_scale, helper_cube_scale, helper_cube_scale)):
+            helper_cube_scale, helper_cube_scale, helper_cube_scale)):
 
         hit, location, _, _, _, _ = bpy.context.scene.ray_cast(
             bpy.context.view_layer.depsgraph,
@@ -423,7 +425,15 @@ def write_flink(output_dir: str,
     :param camera_id: Camera ID prefix for filenames.
     :param tags: List of tags to add to the metadata. Can be a single list of tags or a list of lists of tags. If it is a list of lists, each list should correspond to a frame. If it is a single list, the same tags will be added to all frames.
     """
-    with HideMeshWithProperty(property_name="flink_obj_id", inverse=True, DEBUG=True):
+    # Select target objects
+    scene_objects = []
+    for obj in bpy.context.scene.objects:
+        if obj.type == 'MESH' and not obj.hide_render:
+            scene_objects.append(MeshObject(obj))
+        elif obj.hide_render:
+            print(f"object {obj.name} is hidden")
+
+    with HideMeshWithProperty(scene_objects, property_name="flink_obj", inverse=True, DEBUG=True):
         # check data conformity
         assert len(instance_attribute_maps) == len(
             instance_segmaps), "instance_attribute_maps and instance_segmaps must have the same length."
@@ -460,14 +470,6 @@ def write_flink(output_dir: str,
             else:
                 raise FileExistsError(
                     f"The output folder already exists: {dir_path}")
-
-        # Select target objects
-        target_objects = []
-        for obj in bpy.context.scene.objects:
-            if obj.type == 'MESH' and not obj.hide_render:
-                target_objects.append(MeshObject(obj))
-            elif obj.hide_render:
-                print(f"object {obj.name} is hidden")
 
         # Go through all frames
         for frame_id in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
@@ -516,7 +518,7 @@ def write_flink(output_dir: str,
             _FlinkWriterUtility.write_json(metadata_path, metadata)
 
             labels = _FlinkWriterUtility.get_frame_labels(
-                instance_segmaps[frame_id], instance_attribute_maps[frame_id], target_objects)
+                instance_segmaps[frame_id], instance_attribute_maps[frame_id], scene_objects)
             labels_path = os.path.join(
                 dataset_dir, 'labels', f"{filename_stem}.json")
             _FlinkWriterUtility.write_json(labels_path, labels)
@@ -579,10 +581,10 @@ class _FlinkWriterUtility:
 
         obj_id_2_mesh_map = {}
         for obj in objs:
-            if not "flink_obj_id" in obj.blender_obj.data:
+            if not obj.has_cp("obj_id"):
                 continue
             assert isinstance(obj, MeshObject), "Only MeshObject is supported"
-            obj_id_2_mesh_map[obj.blender_obj.data["flink_obj_id"]] = obj
+            obj_id_2_mesh_map[obj.get_cp("obj_id")] = obj
 
         inst_idx_2_obj_id_map = {}
         for inst_attr in inst_attribute_map:
