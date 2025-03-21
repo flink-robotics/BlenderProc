@@ -657,14 +657,12 @@ class _FlinkWriterUtility:
 
         if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
             pick_class = {
-                "user_id": "blenderproc",
-                "class": "free"
+                "blenderproc": "free",
             }
             print(f"object {obj_mesh.get_name()} is free")
         else:
             pick_class = {
-                "user_id": "blenderproc",
-                "class": "occupied"
+                "blenderproc": "occupied"
             }
             print(f"object {obj_mesh.get_name()} is occupied")
 
