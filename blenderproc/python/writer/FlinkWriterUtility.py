@@ -10,10 +10,93 @@ import uuid
 import numpy as np
 import cv2
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 from blenderproc.python.types.MeshObjectUtility import MeshObject
 from blenderproc.python.writer.WriterUtility import _WriterUtility
+
+# https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
+def is_ray_hit_vertex(vtx: Vector, ray_origin: Vector, ray_direction: Vector, helper_cube_scale: float = 0.0001, DEBUG: bool = False) -> bool:
+    """Checks if a vertex is occluded by objects in the scene w.r.t. a given ray.
+
+    Args:
+        vtx (Vector): the world space x, y and z coordinates of the vertex.
+        ray_origin (Vector): origin point of the ray
+        ray_direction (Vector): direction vector of the ray
+        helper_cube_scale (float, optional): Scale of helper geometry. Defaults to 0.0001.
+        DEBUG (bool, optional): Enable debug visualization. Defaults to False.
+
+    Returns:
+        boolean: visibility
+    """
+    vtx = Vector(vtx)
+    ray_origin = Vector(ray_origin)
+    ray_direction = Vector(ray_direction).normalized()
+
+    # add small cube around coord to make sure the ray will intersect
+    # as the ray_cast is not always accurate
+    # cf https://blender.stackexchange.com/a/87755
+    bpy.ops.mesh.primitive_cube_add(location=vtx, scale=(
+        helper_cube_scale, helper_cube_scale, helper_cube_scale))
+    cube = bpy.context.object
+
+    hit, location, _, _, _, _ = bpy.context.scene.ray_cast(
+        bpy.context.view_layer.depsgraph,
+        origin=ray_origin + ray_direction * 0.0001,  # avoid self intersection
+        direction=ray_direction,
+    )
+
+    if DEBUG:
+        print(f"hit location: {location}")
+        bpy.ops.mesh.primitive_ico_sphere_add(
+            location=location, scale=(
+                helper_cube_scale, helper_cube_scale, helper_cube_scale)
+        )
+
+    # remove the auxiliary cube
+    if not DEBUG:
+        bpy.data.objects.remove(cube, do_unlink=True)
+
+    if not hit:
+        raise ValueError(
+            "No hit found, this should not happen as the ray should always hit the vertex itself.")
+    # if the hit is the vertex itself, it is not occluded
+    if (location - vtx).length < helper_cube_scale * 2:
+        return False
+    return True
+
+
+def is_object_occluded_for_scene_camera(camera: bpy.types.Object, obj: bpy.types.Object, DEBUG: bool = False) -> bool:
+    """Checks if all vertices of an object are occluded by objects in the scene w.r.t. the camera.
+
+    Args:
+        obj (bpy.types.Object): the object.
+
+    Returns:
+        boolean: visibility
+    """
+    for vertex in obj.data.vertices:
+        coords = obj.matrix_world @ vertex.co
+        breakpoint()
+        if not is_ray_hit_vertex(coords, camera.location, coords - camera.location, DEBUG=DEBUG):
+            return False
+    return True
+
+
+def is_object_all_visible(obj: bpy.types.Object, DEBUG: bool = False) -> bool:
+    """Checks if all vertices of an object are visible by objects in the scene w.r.t. the camera.
+
+    Args:
+        obj (bpy.types.Object): the object.
+
+    Returns:
+        boolean: visibility
+    """
+    for vertex in obj.data.vertices:
+        coords = obj.matrix_world @ vertex.co
+        if not is_ray_hit_vertex(coords, DEBUG=DEBUG):
+            return False
+    return True
 
 
 def binary_mask_to_rle(binary_mask: np.ndarray, bbox: List[int]) -> List[int]:
@@ -143,6 +226,8 @@ def write_flink(output_dir: str,
     for obj in bpy.context.scene.objects:
         if obj.type == 'MESH' and not obj.hide_render:
             target_objects.append(MeshObject(obj))
+            # print(
+            #     f"target_objects: {obj}, occluded: {is_object_occluded_for_scene_camera(obj, DEBUG=False)}")
 
     # Go through all frames
     for frame_id in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
