@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 import bpy
 from mathutils import Matrix, Vector
+from bpy_extras.object_utils import world_to_camera_view
 
 from blenderproc.python.types.MeshObjectUtility import MeshObject
 from blenderproc.python.writer.WriterUtility import _WriterUtility
@@ -95,6 +96,244 @@ def is_object_all_visible(obj: bpy.types.Object, DEBUG: bool = False) -> bool:
     for vertex in obj.data.vertices:
         coords = obj.matrix_world @ vertex.co
         if not is_ray_hit_vertex(coords, DEBUG=DEBUG):
+            return False
+    return True
+
+
+class HideMeshWithProperty:
+    """Context manager that temporarily hides all objects without a 'flink_obj_id' attribute.
+
+    Args:
+        property_name (str): The name of the property to check.
+        inverse (bool, optional): If True, hide objects that have the property. Defaults to False.
+        DEBUG (bool, optional): If True, print debug information. Defaults to False.
+
+    Example:
+        ```python
+        with HideMeshWithProperty():
+            # Only objects with flink_obj_id will be visible here
+            # Perform operations on visible objects
+        # All objects are restored to their original visibility state here
+        ```
+    """
+
+    def __init__(self, property_name: str, inverse: bool = False, DEBUG: bool = False):
+        """Initialize the context manager."""
+        self.hidden_objects = []
+        self.property_name = property_name
+        self.inverse = inverse
+        self.DEBUG = DEBUG
+
+    def __enter__(self) -> 'HideMeshWithProperty':
+        """Hide all objects without a 'flink_obj_id' attribute.
+
+        Returns:
+            HideMeshWithProperty: The context manager instance.
+        """
+        # Store and hide objects that don't have the flink_obj_id attribute
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH' and not obj.hide_render:
+                if (self.property_name in obj.data) != self.inverse:
+                    self.hidden_objects.append(obj)
+                    obj.hide_render = True
+                    obj.hide_viewport = True
+                    if self.DEBUG:
+                        print(
+                            f"Hiding object {obj.name}, property {self.property_name}: {self.property_name in obj.data}, inverse: {self.inverse}")
+
+        return self
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
+        """Restore the original visibility state of all hidden objects.
+
+        Args:
+            exc_type: The exception type if an exception was raised in the context.
+            exc_val: The exception value if an exception was raised in the context.
+            exc_tb: The traceback if an exception was raised in the context.
+        """
+        # Restore visibility of hidden objects
+        for obj in self.hidden_objects:
+            obj.hide_render = False
+            obj.hide_viewport = False
+            if self.DEBUG:
+                print(f"Restoring visibility of object {obj.name}")
+
+
+class AuxiliaryCube:
+    """Context manager that adds an auxiliary cube to the scene."""
+
+    def __init__(self, location: Vector, scale: Vector):
+        self.location = location
+        self.scale = scale
+        self.cube = None
+
+    def __enter__(self) -> bpy.types.Object:
+        """Add an auxiliary cube to the scene."""
+        bpy.ops.mesh.primitive_cube_add(
+            location=self.location, scale=self.scale)
+        self.cube = bpy.context.object
+        return self.cube
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
+        """Remove the auxiliary cube from the scene."""
+        bpy.data.objects.remove(self.cube, do_unlink=True)
+
+# https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
+def is_ray_hit_obj(vtx: Vector, ray_origin: Vector, ray_direction: Vector, helper_cube_scale: float = 0.0001, DEBUG: bool = False) -> bool:
+    """Checks if a vertex is occluded by objects in the scene w.r.t. a given ray.
+
+    Args:
+        vtx (Vector): the world space x, y and z coordinates of the vertex.
+        ray_origin (Vector): origin point of the ray
+        ray_direction (Vector): direction vector of the ray
+        helper_cube_scale (float, optional): Scale of helper geometry. Defaults to 0.0001.
+        DEBUG (bool, optional): Enable debug visualization. Defaults to False.
+
+    Returns:
+        boolean: visibility
+    """
+    vtx = Vector(vtx)
+    ray_origin = Vector(ray_origin)
+    ray_direction = Vector(ray_direction).normalized()
+
+    # add small cube around coord to make sure the ray will intersect
+    # as the ray_cast is not always accurate
+    # cf https://blender.stackexchange.com/a/87755
+    with AuxiliaryCube(location=vtx, scale=(
+        helper_cube_scale, helper_cube_scale, helper_cube_scale)):
+
+        hit, location, _, _, _, _ = bpy.context.scene.ray_cast(
+            bpy.context.view_layer.depsgraph,
+            origin=ray_origin + ray_direction * 0.0001,  # avoid self intersection
+            direction=ray_direction,
+        )
+
+        if DEBUG:
+            print(f"hit location: {location}")
+            bpy.ops.mesh.primitive_ico_sphere_add(
+                location=location, scale=(
+                    helper_cube_scale, helper_cube_scale, helper_cube_scale)
+            )
+
+        if not hit:
+            raise ValueError(
+                "No hit found, this should not happen as the ray should always hit the vertex itself.")
+        # if the hit is the vertex itself, it is not occluded
+        if (location - vtx).length < helper_cube_scale * 2:
+            return False
+    return True
+
+
+# https://github.com/DLR-RM/BlenderProc/issues/990#issuecomment-1764989373
+def object_hit_by_ray(ray_origin: Vector, ray_direction: Vector, DEBUG: bool = False) -> Optional[bpy.types.Object]:
+    """Checks if a vertex is occluded by objects in the scene w.r.t. a given ray.
+
+    Args:
+        ray_origin (Vector): origin point of the ray
+        ray_direction (Vector): direction vector of the ray
+        DEBUG (bool, optional): Enable debug visualization. Defaults to False.
+
+    Returns:
+        bpy.types.Object: the object that was hit
+    """
+    hit, location, _, _, obj, _ = bpy.context.scene.ray_cast(
+        bpy.context.view_layer.depsgraph,
+        origin=ray_origin + ray_direction * 0.0001,  # avoid self intersection
+        direction=ray_direction,
+    )
+
+    if DEBUG:
+        print(
+            f"hit location: {location} with object {obj.name if obj else 'None'}")
+
+    if hit:
+        return obj
+    else:
+        return None
+
+
+def is_object_pickable(obj: bpy.types.Object, vertex_min_distance: float = 0.01, helper_cube_scale: float = 0.0001, DEBUG: bool = False) -> bool:
+    """Checks if the object is pickable, the object is pickable only if there's no other object on the top of it.
+
+    Args:
+        obj (bpy.types.Object): The object to check for pickability.
+        vertex_min_distance (float, optional): Minimum distance between sampled vertices in 2D projection. Defaults to 0.01.
+        helper_cube_scale (float, optional): Scale of helper cube for ray intersection. Defaults to 0.0001.
+        DEBUG (bool, optional): Enable debug visualization. Defaults to False.
+
+    Returns:
+        bool: True if the object is pickable (no occlusion from above), False otherwise.
+    """
+
+    # Project all vertices onto a 2D plane parallel to XY-plane
+    projected_vertices = []
+    for vertex in obj.data.vertices:
+        world_coords = obj.matrix_world @ vertex.co
+        # Only keep x and y coordinates for 2D projection
+        projected_vertices.append(
+            (world_coords.x, world_coords.y, world_coords.z))
+
+    # Sample vertices based on minimum distance in 2D projection
+    sampled_vertices = []
+    for i, (x, y, z) in enumerate(projected_vertices):
+        # Check if this vertex is far enough from all previously sampled vertices
+        should_sample = True
+        for sx, sy, _ in sampled_vertices:
+            # Calculate 2D distance
+            dist_2d = ((x - sx) ** 2 + (y - sy) ** 2) ** 0.5
+            if dist_2d < vertex_min_distance:
+                should_sample = False
+                break
+
+        if should_sample:
+            sampled_vertices.append((x, y, z))
+
+    if DEBUG:
+        print(
+            f"Sampled {len(sampled_vertices)} vertices out of {len(projected_vertices)}")
+
+    # Perform ray casting from above for each sampled vertex
+    for x, y, z in sampled_vertices:
+        # Create ray from infinity in +z direction (top-down)
+        ray_origin = Vector((x, y, 1000.0))  # Far away in +z direction
+        # Pointing down in -z direction
+        ray_direction = Vector((0.0, 0.0, -1.0))
+
+        # Add small cube around coordinate to ensure ray intersection
+        with AuxiliaryCube(location=Vector((x, y, z)), scale=(helper_cube_scale, helper_cube_scale, helper_cube_scale)) as cube:
+            # Cast ray and check for intersection
+            hit_obj = object_hit_by_ray(ray_origin, ray_direction, DEBUG=DEBUG)
+
+            if not hit_obj:
+                raise ValueError(
+                    "No hit found, this should not happen as the ray should always hit the vertex itself.")
+
+            # If the hit object is not our target object, then our object is occluded
+            if hit_obj.name != obj.name and hit_obj.name != cube.name:
+                return False
+
+    return True
+
+
+def is_object_all_within_view(camera: bpy.types.Object, obj: bpy.types.Object, DEBUG: bool = False) -> bool:
+    """Checks if all vertices of an object are visible within the camera's view.
+
+    Args:
+        camera (bpy.types.Object): the camera.
+        obj (bpy.types.Object): the object.
+
+    Returns:
+        boolean: visibility
+    """
+    cs, ce = camera.data.clip_start, camera.data.clip_end
+
+    for v in obj.data.vertices:
+        co_ndc = world_to_camera_view(
+            bpy.context.scene, camera, obj.matrix_world @ v.co)
+        # check wether point is inside frustum
+        if not (0.0 < co_ndc.x < 1.0 and
+                0.0 < co_ndc.y < 1.0 and
+                cs < co_ndc.z < ce):
             return False
     return True
 
@@ -184,102 +423,103 @@ def write_flink(output_dir: str,
     :param camera_id: Camera ID prefix for filenames.
     :param tags: List of tags to add to the metadata. Can be a single list of tags or a list of lists of tags. If it is a list of lists, each list should correspond to a frame. If it is a single list, the same tags will be added to all frames.
     """
-    # check data conformity
-    assert len(instance_attribute_maps) == len(
-        instance_segmaps), "instance_attribute_maps and instance_segmaps must have the same length."
-    assert isinstance(
-        tags, list), "Tags must be a list of lists or a single list."
-    if len(tags) > 0:
-        if isinstance(tags[0], list):
-            # tags is a list of lists
-            assert len(tags) == len(
-                instance_segmaps), "Tags and instance_segmaps must have the same length."
-        else:
-            # tags is a single list
-            tags = [tags] * len(instance_segmaps)
-    else:
-        tags = [[]] * len(instance_segmaps)
-
-    if depths is not None:
-        assert len(depths) == len(
-            instance_segmaps), "Depths and instance_segmaps must have the same length."
-    if colors is not None:
-        assert len(colors) == len(
-            instance_segmaps), "Colors and instance_segmaps must have the same length."
-
-    # Create output directories
-    dataset_dir: Path = Path(output_dir) / \
-        dataset if dataset else Path(output_dir)
-
-    # Create required subdirectories
-    subdirs = ['depth', 'images', 'labels', 'metadata']
-    for subdir in subdirs:
-        dir_path = dataset_dir / subdir
-        if not dir_path.exists():
-            dir_path.mkdir(parents=True, exist_ok=True)
-        else:
-            raise FileExistsError(
-                f"The output folder already exists: {dir_path}")
-
-    # Select target objects
-    target_objects = []
-    for obj in bpy.context.scene.objects:
-        if obj.type == 'MESH' and not obj.hide_render:
-            target_objects.append(MeshObject(obj))
-            # print(
-            #     f"target_objects: {obj}, occluded: {is_object_occluded_for_scene_camera(obj, DEBUG=False)}")
-
-    # Go through all frames
-    for frame_id in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
-        # Set frame
-        bpy.context.scene.frame_set(frame_id)
-
-        # Generate timestamp-based filename
-        timestamp = f"{frame_id:012d}"
-        filename_stem = f"{camera_id}_{timestamp}"
-
-        # Save color image
-        if colors is not None:
-            color_idx = frame_id - bpy.context.scene.frame_start
-            color = colors[color_idx]
-            # Convert RGB to BGR for OpenCV
-            color_bgr = color.copy()
-            color_bgr[..., :3] = color_bgr[..., :3][..., ::-1]
-
-            if color_file_format == "PNG":
-                image_path = os.path.join(
-                    dataset_dir, 'images', f"{filename_stem}.png")
-                cv2.imwrite(image_path, color_bgr)
-            elif color_file_format == "JPEG":
-                image_path = os.path.join(
-                    dataset_dir, 'images', f"{filename_stem}.jpg")
-                cv2.imwrite(image_path, color_bgr, [
-                            int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
+    with HideMeshWithProperty(property_name="flink_obj_id", inverse=True, DEBUG=True):
+        # check data conformity
+        assert len(instance_attribute_maps) == len(
+            instance_segmaps), "instance_attribute_maps and instance_segmaps must have the same length."
+        assert isinstance(
+            tags, list), "Tags must be a list of lists or a single list."
+        if len(tags) > 0:
+            if isinstance(tags[0], list):
+                # tags is a list of lists
+                assert len(tags) == len(
+                    instance_segmaps), "Tags and instance_segmaps must have the same length."
             else:
-                raise ValueError(f"Unknown color_file_format: "
-                                 "{color_file_format}")
+                # tags is a single list
+                tags = [tags] * len(instance_segmaps)
+        else:
+            tags = [[]] * len(instance_segmaps)
 
-        # Save depth image
         if depths is not None:
-            depth_idx = frame_id - bpy.context.scene.frame_start
-            depth = depths[depth_idx]
-            depth_path = os.path.join(
-                dataset_dir, 'depth', f"{filename_stem}.png")
-            # Convert depth to uint16 PNG
-            depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
-            cv2.imwrite(depth_path, depth_mm)
+            assert len(depths) == len(
+                instance_segmaps), "Depths and instance_segmaps must have the same length."
+        if colors is not None:
+            assert len(colors) == len(
+                instance_segmaps), "Colors and instance_segmaps must have the same length."
 
-        # Generate and save metadata
-        metadata = _FlinkWriterUtility.get_frame_metadata(tags[frame_id])
-        metadata_path = os.path.join(
-            dataset_dir, 'metadata', f"{filename_stem}.json")
-        _FlinkWriterUtility.write_json(metadata_path, metadata)
+        # Create output directories
+        dataset_dir: Path = Path(output_dir) / \
+            dataset if dataset else Path(output_dir)
 
-        labels = _FlinkWriterUtility.get_frame_labels(
-            instance_segmaps[frame_id], instance_attribute_maps[frame_id], target_objects)
-        labels_path = os.path.join(
-            dataset_dir, 'labels', f"{filename_stem}.json")
-        _FlinkWriterUtility.write_json(labels_path, labels)
+        # Create required subdirectories
+        subdirs = ['depth', 'images', 'labels', 'metadata']
+        for subdir in subdirs:
+            dir_path = dataset_dir / subdir
+            if not dir_path.exists():
+                dir_path.mkdir(parents=True, exist_ok=True)
+            else:
+                raise FileExistsError(
+                    f"The output folder already exists: {dir_path}")
+
+        # Select target objects
+        target_objects = []
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH' and not obj.hide_render:
+                target_objects.append(MeshObject(obj))
+            elif obj.hide_render:
+                print(f"object {obj.name} is hidden")
+
+        # Go through all frames
+        for frame_id in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
+            # Set frame
+            bpy.context.scene.frame_set(frame_id)
+
+            # Generate timestamp-based filename
+            timestamp = f"{frame_id:012d}"
+            filename_stem = f"{camera_id}_{timestamp}"
+
+            # Save color image
+            if colors is not None:
+                color_idx = frame_id - bpy.context.scene.frame_start
+                color = colors[color_idx]
+                # Convert RGB to BGR for OpenCV
+                color_bgr = color.copy()
+                color_bgr[..., :3] = color_bgr[..., :3][..., ::-1]
+
+                if color_file_format == "PNG":
+                    image_path = os.path.join(
+                        dataset_dir, 'images', f"{filename_stem}.png")
+                    cv2.imwrite(image_path, color_bgr)
+                elif color_file_format == "JPEG":
+                    image_path = os.path.join(
+                        dataset_dir, 'images', f"{filename_stem}.jpg")
+                    cv2.imwrite(image_path, color_bgr, [
+                                int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
+                else:
+                    raise ValueError(f"Unknown color_file_format: "
+                                     "{color_file_format}")
+
+            # Save depth image
+            if depths is not None:
+                depth_idx = frame_id - bpy.context.scene.frame_start
+                depth = depths[depth_idx]
+                depth_path = os.path.join(
+                    dataset_dir, 'depth', f"{filename_stem}.png")
+                # Convert depth to uint16 PNG
+                depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
+                cv2.imwrite(depth_path, depth_mm)
+
+            # Generate and save metadata
+            metadata = _FlinkWriterUtility.get_frame_metadata(tags[frame_id])
+            metadata_path = os.path.join(
+                dataset_dir, 'metadata', f"{filename_stem}.json")
+            _FlinkWriterUtility.write_json(metadata_path, metadata)
+
+            labels = _FlinkWriterUtility.get_frame_labels(
+                instance_segmaps[frame_id], instance_attribute_maps[frame_id], target_objects)
+            labels_path = os.path.join(
+                dataset_dir, 'labels', f"{filename_stem}.json")
+            _FlinkWriterUtility.write_json(labels_path, labels)
 
 
 class _FlinkWriterUtility:
@@ -339,10 +579,10 @@ class _FlinkWriterUtility:
 
         obj_id_2_mesh_map = {}
         for obj in objs:
-            if not obj.has_cp("obj_id"):
+            if not "flink_obj_id" in obj.blender_obj.data:
                 continue
             assert isinstance(obj, MeshObject), "Only MeshObject is supported"
-            obj_id_2_mesh_map[obj.get_cp("obj_id")] = obj
+            obj_id_2_mesh_map[obj.blender_obj.data["flink_obj_id"]] = obj
 
         inst_idx_2_obj_id_map = {}
         for inst_attr in inst_attribute_map:
@@ -411,10 +651,29 @@ class _FlinkWriterUtility:
             "size": (max_point - min_point).tolist()
         }
 
+        # Do the ray casting to see if the object is within the view
+        all_within_view = is_object_all_within_view(
+            bpy.context.scene.camera, obj_mesh.blender_obj)
+
+        if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
+            pick_class = {
+                "user_id": "blenderproc",
+                "class": "free"
+            }
+            print(f"object {obj_mesh.get_name()} is free")
+        else:
+            pick_class = {
+                "user_id": "blenderproc",
+                "class": "occupied"
+            }
+            print(f"object {obj_mesh.get_name()} is occupied")
+
         annotation_info: Dict[str, Union[str, int]] = {
             "category_id": str(category_id),
             "bbox": bounding_box,
             "mask": mask,
+            "pick_class": pick_class,
+            "all_within_view": all_within_view,
             "object_id": object_id,
             "pose_estimation": pose_estimation,
             "shortuuid": str(uuid.uuid4())[:8]
