@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from itertools import groupby
 import uuid
+import time
 
 import numpy as np
 import cv2
@@ -159,7 +160,6 @@ def is_object_occluded_for_scene_camera(camera: bpy.types.Object, obj: bpy.types
     """
     for vertex in obj.data.vertices:
         coords = obj.matrix_world @ vertex.co
-        breakpoint()
         if not is_ray_hit_vertex(coords, camera.location, coords - camera.location, DEBUG=DEBUG):
             return False
     return True
@@ -268,27 +268,28 @@ def is_object_pickable(obj: bpy.types.Object, vertex_min_distance: float = 0.01,
     """
 
     # Project all vertices onto a 2D plane parallel to XY-plane
-    projected_vertices = []
-    for vertex in obj.data.vertices:
-        world_coords = obj.matrix_world @ vertex.co
-        # Only keep x and y coordinates for 2D projection
-        projected_vertices.append(
-            (world_coords.x, world_coords.y, world_coords.z))
+    projected_vertices = [obj.matrix_world @ vtx.co for vtx in obj.data.vertices]
+    # Convert to numpy array for better performance
+    projected_vertices = np.array(projected_vertices)
 
     # Sample vertices based on minimum distance in 2D projection
     sampled_vertices = []
-    for i, (x, y, z) in enumerate(projected_vertices):
-        # Check if this vertex is far enough from all previously sampled vertices
-        should_sample = True
-        for sx, sy, _ in sampled_vertices:
-            # Calculate 2D distance
-            dist_2d = ((x - sx) ** 2 + (y - sy) ** 2) ** 0.5
-            if dist_2d < vertex_min_distance:
-                should_sample = False
-                break
-
-        if should_sample:
-            sampled_vertices.append((x, y, z))
+    if len(projected_vertices) > 0:
+        # Start with the first vertex
+        sampled_vertices.append(projected_vertices[0].tolist())
+        
+        # For each remaining vertex, check distance to all sampled vertices
+        for i in range(1, len(projected_vertices)):
+            vertex = projected_vertices[i]
+            
+            # Calculate distances to all sampled vertices (only using x,y coordinates)
+            if sampled_vertices:
+                sampled_np = np.array(sampled_vertices)[:, :2]  # Only x,y coordinates
+                dists = np.sqrt(np.sum((sampled_np - vertex[:2])**2, axis=1))
+                
+                # If all distances are greater than minimum, add this vertex
+                if np.all(dists >= vertex_min_distance):
+                    sampled_vertices.append(vertex.tolist())
 
     if DEBUG:
         print(
@@ -657,16 +658,17 @@ class _FlinkWriterUtility:
         all_within_view = is_object_all_within_view(
             bpy.context.scene.camera, obj_mesh.blender_obj)
 
+        time_start = time.time()
         if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
             pick_class = {
                 "blenderproc": "free",
             }
-            print(f"object {obj_mesh.get_name()} is free")
         else:
             pick_class = {
                 "blenderproc": "occupied"
             }
-            print(f"object {obj_mesh.get_name()} is occupied")
+        time_end = time.time()
+        print(f"pickability check time taken: {time_end - time_start} seconds")
 
         annotation_info: Dict[str, Union[str, int]] = {
             "category_id": str(category_id),
