@@ -639,7 +639,7 @@ class _FlinkWriterUtility:
         w2obj = Matrix(obj_mesh.get_local2world_mat())
 
         dim_local = obj_mesh.get_bound_box(
-            local_coords=True)  # Get world coordinates
+            local_coords=True) * obj_mesh.get_scale()  # Get world coordinates
         min_point = np.min(dim_local, axis=0)
         max_point = np.max(dim_local, axis=0)
         center = (min_point + max_point) / 2
