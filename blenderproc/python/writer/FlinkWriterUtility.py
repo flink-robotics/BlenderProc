@@ -268,7 +268,8 @@ def is_object_pickable(obj: bpy.types.Object, vertex_min_distance: float = 0.01,
     """
 
     # Project all vertices onto a 2D plane parallel to XY-plane
-    projected_vertices = [obj.matrix_world @ vtx.co for vtx in obj.data.vertices]
+    projected_vertices = [obj.matrix_world @
+                          vtx.co for vtx in obj.data.vertices]
     # Convert to numpy array for better performance
     projected_vertices = np.array(projected_vertices)
 
@@ -277,16 +278,17 @@ def is_object_pickable(obj: bpy.types.Object, vertex_min_distance: float = 0.01,
     if len(projected_vertices) > 0:
         # Start with the first vertex
         sampled_vertices.append(projected_vertices[0].tolist())
-        
+
         # For each remaining vertex, check distance to all sampled vertices
         for i in range(1, len(projected_vertices)):
             vertex = projected_vertices[i]
-            
+
             # Calculate distances to all sampled vertices (only using x,y coordinates)
             if sampled_vertices:
-                sampled_np = np.array(sampled_vertices)[:, :2]  # Only x,y coordinates
+                sampled_np = np.array(sampled_vertices)[
+                    :, :2]  # Only x,y coordinates
                 dists = np.sqrt(np.sum((sampled_np - vertex[:2])**2, axis=1))
-                
+
                 # If all distances are greater than minimum, add this vertex
                 if np.all(dists >= vertex_min_distance):
                     sampled_vertices.append(vertex.tolist())
@@ -472,6 +474,9 @@ def write_flink(output_dir: str,
                 raise FileExistsError(
                     f"The output folder already exists: {dir_path}")
 
+        # Run pickability check once for each object, because it's expensive and fixed for all frames
+        pickability_info_cache = {}
+
         # Go through all frames
         for frame_id in range(bpy.context.scene.frame_start, bpy.context.scene.frame_end):
             # Set frame
@@ -519,7 +524,7 @@ def write_flink(output_dir: str,
             _FlinkWriterUtility.write_json(metadata_path, metadata)
 
             labels = _FlinkWriterUtility.get_frame_labels(
-                instance_segmaps[frame_id], instance_attribute_maps[frame_id], scene_objects)
+                instance_segmaps[frame_id], instance_attribute_maps[frame_id], scene_objects, pickability_info_cache)
             labels_path = os.path.join(
                 dataset_dir, 'labels', f"{filename_stem}.json")
             _FlinkWriterUtility.write_json(labels_path, labels)
@@ -571,7 +576,7 @@ class _FlinkWriterUtility:
         }
 
     @staticmethod
-    def get_frame_labels(inst_segmap: np.ndarray, inst_attribute_map: dict, objs: List[MeshObject]):
+    def get_frame_labels(inst_segmap: np.ndarray, inst_attribute_map: dict, objs: List[MeshObject], pickability_info_cache: Dict[int, Dict[str, str]]):
         """Generates coco annotations for images
 
         :param inst_segmap: instance segmentation map
@@ -614,7 +619,8 @@ class _FlinkWriterUtility:
                     inst_idx_2_obj_id_map[inst_idx],
                     "box",
                     binary_inst_mask,
-                    obj_mesh
+                    obj_mesh,
+                    pickability_info_cache
                 )
                 annotations.append(annotation)
 
@@ -625,7 +631,28 @@ class _FlinkWriterUtility:
         return flink_labels
 
     @staticmethod
-    def create_annotation_info(object_id: int, category_id: int, binary_mask: np.ndarray, obj_mesh: MeshObject) -> Optional[Dict[str, Union[str, int]]]:
+    def get_pickability_info(obj_id: int, obj_mesh: MeshObject, cached_pickability_info: Dict[int, Dict[str, str]]) -> Dict[str, str]:
+        """Returns pickability info for an object"""
+        if obj_id in cached_pickability_info:
+            print(f"obj {obj_id} pickability info already cached")
+            return cached_pickability_info[obj_id]
+
+        time_start = time.time()
+        if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
+            cached_pickability_info[obj_id] = {
+                "blenderproc": "free",
+            }
+        else:
+            cached_pickability_info[obj_id] = {
+                "blenderproc": "occupied"
+            }
+        time_end = time.time()
+        print(
+            f"obj {obj_id} pickability check time taken: {time_end - time_start} seconds")
+        return cached_pickability_info[obj_id]
+
+    @staticmethod
+    def create_annotation_info(object_id: int, category_id: int, binary_mask: np.ndarray, obj_mesh: MeshObject, pickability_info_cache: Dict[int, Dict[str, str]]) -> Optional[Dict[str, Union[str, int]]]:
         """Creates info section of coco annotation
 
         :param category_id: Id of the category
@@ -658,17 +685,8 @@ class _FlinkWriterUtility:
         all_within_view = is_object_all_within_view(
             bpy.context.scene.camera, obj_mesh.blender_obj)
 
-        time_start = time.time()
-        if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
-            pick_class = {
-                "blenderproc": "free",
-            }
-        else:
-            pick_class = {
-                "blenderproc": "occupied"
-            }
-        time_end = time.time()
-        print(f"pickability check time taken: {time_end - time_start} seconds")
+        pick_class = _FlinkWriterUtility.get_pickability_info(
+            object_id, obj_mesh, pickability_info_cache)
 
         annotation_info: Dict[str, Union[str, int]] = {
             "category_id": str(category_id),
