@@ -19,7 +19,7 @@ from blenderproc.python.writer.WriterUtility import _WriterUtility
 
 
 class HideMeshWithProperty:
-    """Context manager that temporarily hides all objects without a 'obj_id' attribute.
+    """Context manager that temporarily hides all objects without <property_name> attribute.
 
     Args:
         scene_objects (List[MeshObject]): The list of objects to hide.
@@ -30,7 +30,7 @@ class HideMeshWithProperty:
     Example:
         ```python
         with HideMeshWithProperty():
-            # Only objects with obj_id will be visible here
+            # Only objects with <property_name> will be visible here
             # Perform operations on visible objects
         # All objects are restored to their original visibility state here
         ```
@@ -45,12 +45,12 @@ class HideMeshWithProperty:
         self.DEBUG = DEBUG
 
     def __enter__(self) -> 'HideMeshWithProperty':
-        """Hide all objects without a 'obj_id' attribute.
+        """Hide all objects without <property_name> attribute.
 
         Returns:
             HideMeshWithProperty: The context manager instance.
         """
-        # Store and hide objects that don't have the obj_id attribute
+        # Store and hide objects that don't have the <property_name> attribute
         for obj in self.scene_objects:
             if obj.has_cp(self.property_name) != self.inverse:
                 self.hidden_objects.append(obj)
@@ -436,7 +436,7 @@ def write_flink(output_dir: str,
         elif obj.hide_render:
             print(f"object {obj.name} is hidden")
 
-    with HideMeshWithProperty(scene_objects, property_name="flink_obj", inverse=True, DEBUG=True):
+    with HideMeshWithProperty(scene_objects, property_name="flink_metadata", inverse=True):
         # check data conformity
         assert len(instance_attribute_maps) == len(
             instance_segmaps), "instance_attribute_maps and instance_segmaps must have the same length."
@@ -615,9 +615,13 @@ class _FlinkWriterUtility:
 
                 obj_mesh = obj_id_2_mesh_map[inst_idx_2_obj_id_map[inst_idx]]
 
+                flink_metadata: dict = obj_mesh.get_cp("flink_metadata")
+
+                assert flink_metadata["obj_id"] == inst_idx_2_obj_id_map[inst_idx], f"Object id mismatch, expected {inst_idx_2_obj_id_map[inst_idx]}, but got {flink_metadata['obj_id']}"
+
                 annotation = _FlinkWriterUtility.create_annotation_info(
                     inst_idx_2_obj_id_map[inst_idx],
-                    "box",
+                    flink_metadata["category_id"],
                     binary_inst_mask,
                     obj_mesh,
                     pickability_info_cache
@@ -652,10 +656,10 @@ class _FlinkWriterUtility:
         return cached_pickability_info[obj_id]
 
     @staticmethod
-    def create_annotation_info(object_id: int, category_id: int, binary_mask: np.ndarray, obj_mesh: MeshObject, pickability_info_cache: Dict[int, Dict[str, str]]) -> Optional[Dict[str, Union[str, int]]]:
+    def create_annotation_info(object_id: int, category_id: str, binary_mask: np.ndarray, obj_mesh: MeshObject, pickability_info_cache: Dict[int, Dict[str, str]]) -> Optional[Dict[str, Union[str, int]]]:
         """Creates info section of coco annotation
 
-        :param category_id: Id of the category
+        :param category_id: name of the category
         :param binary_mask: A binary image mask of the object with the shape [H, W].
         """
 
@@ -689,7 +693,7 @@ class _FlinkWriterUtility:
             object_id, obj_mesh, pickability_info_cache)
 
         annotation_info: Dict[str, Union[str, int]] = {
-            "category_id": str(category_id),
+            "category_id": category_id,
             "bbox": bounding_box,
             "mask": mask,
             "pick_class": pick_class,
