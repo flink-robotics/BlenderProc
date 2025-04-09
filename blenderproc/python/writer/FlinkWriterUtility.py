@@ -410,11 +410,101 @@ def rle_to_binary_mask(rle: List[int], width: int, height: int) -> np.ndarray:
     return mask
 
 
+def add_gaussian_shifts(depth, std=1/2.0):
+
+    rows, cols = depth.shape
+    gaussian_shifts = np.random.normal(0, std, size=(rows, cols, 2))
+    gaussian_shifts = gaussian_shifts.astype(np.float32)
+    breakpoint()
+
+    # creating evenly spaced coordinates
+    xx = np.linspace(0, cols-1, cols)
+    yy = np.linspace(0, rows-1, rows)
+
+    # get xpixels and ypixels
+    xp, yp = np.meshgrid(xx, yy)
+
+    xp = xp.astype(np.float32)
+    yp = yp.astype(np.float32)
+
+    xp_interp = np.minimum(np.maximum(
+        xp + gaussian_shifts[:, :, 0], 0.0), cols)
+    yp_interp = np.minimum(np.maximum(
+        yp + gaussian_shifts[:, :, 1], 0.0), rows)
+
+    depth_interp = cv2.remap(depth, xp_interp, yp_interp, cv2.INTER_LINEAR)
+    # depth_interp[depth == 0] = 0
+
+    return depth_interp
+
+
+def apply_depth_noise(depth: np.ndarray, noise_p1: float = 0.05, noise_p2: float = 0.2, noise_p3: float = 0.01, noise_a1: float = 0.5) -> np.ndarray:
+    """Applies normal noise to the depth map.
+
+    :param depth: Depth map to apply noise to. In meters.
+    :param noise_level: Standard deviation of the noise.
+    :return: Noisy depth map.
+    """
+
+    # Create a copy of the depth map for processing
+    processed_depth = depth.copy()
+
+    # Define the kernel size for neighborhood consideration
+    kernel_size = 5
+
+    # Create a mean filter kernel for valid depth values
+    # We'll use OpenCV's filter2D for efficient convolution
+    kernel = np.ones((kernel_size, kernel_size), np.float32) / \
+        (kernel_size * kernel_size)
+
+    # Create a mask of valid depth values
+    valid_mask = (depth > 0).astype(np.float32)
+
+    # Apply the mean filter to both the depth map and the mask
+    depth_sum = cv2.filter2D(depth, -1, kernel)
+    weight_sum = cv2.filter2D(valid_mask, -1, kernel)
+
+    # Avoid division by zero
+    weight_sum[weight_sum == 0] = 1.0
+
+    # Calculate the weighted average of valid depths in the neighborhood
+    neighborhood_mean = depth_sum / weight_sum
+
+    # Generate binary salt and pepper noise mask for the entire image
+    noise_mask = np.random.random(processed_depth.shape)
+    # Salt noise (set to 1) for noise_p1 percent of valid pixels
+    salt_mask = (noise_mask < noise_p1)
+    weight_mask = np.zeros_like(processed_depth)
+    weight_mask[salt_mask] = 1.0
+
+    # Blend the original depth with the neighborhood mean (90% original, 10% neighborhood)
+    processed_depth[processed_depth > 0] = ((1 - noise_a1) * processed_depth[processed_depth > 0] + noise_a1 * neighborhood_mean[processed_depth > 0]) * \
+        weight_mask[processed_depth > 0] + \
+        (1 - weight_mask[processed_depth > 0]) * \
+        processed_depth[processed_depth > 0]
+
+    # Generate binary salt and pepper noise mask for the entire image
+    noise_mask = np.random.random(processed_depth.shape)
+    # Salt noise (set to 1) for noise_p2 percent of valid pixels
+    salt_mask = (noise_mask < noise_p2)
+    weight_mask = np.zeros_like(processed_depth)
+    weight_mask[salt_mask] = 1.0
+
+    # Add normal noise to the depth with a fixed maximum noise of 10 cm (0.1 m)
+    fixed_noise_sigma = noise_p3   # 1cm
+    noise = np.random.normal(0, fixed_noise_sigma, processed_depth.shape)
+
+    processed_depth[processed_depth > 0] = np.maximum(
+        0, processed_depth[processed_depth > 0] + noise[processed_depth > 0] * weight_mask[processed_depth > 0])
+
+    return processed_depth
+
+
 def write_flink(output_dir: str,
                 instance_segmaps: List[np.ndarray],
                 instance_attribute_maps: List[dict],
                 depths: Optional[List[np.ndarray]] = None, colors: Optional[List[np.ndarray]] = None,
-                color_file_format: str = "PNG", dataset: str = "",
+                color_file_format: str = "PNG", dataset: str = "", noisy_depth: dict | None = None,
                 jpg_quality: int = 95,
                 camera_id: str = "CAMID", tags: List[str] | List[List[str]] = []) -> None:
     """ Writes images, depth maps, labels and metadata in the Flink dataset format.
@@ -511,10 +601,16 @@ def write_flink(output_dir: str,
             if depths is not None:
                 depth_idx = frame_id - bpy.context.scene.frame_start
                 depth = depths[depth_idx]
+                if noisy_depth is not None:
+                    depth = apply_depth_noise(
+                        depth, **noisy_depth)
+                    # depth = add_gaussian_shifts(depth)
+                depth[depth > 1e2] = 0    # set invalid depth to 0
+                # Convert depth to uint16 PNG
+                # Convert to mm
+                depth_mm = (depth * 1000).astype(np.uint16)
                 depth_path = os.path.join(
                     dataset_dir, 'depth', f"{filename_stem}.png")
-                # Convert depth to uint16 PNG
-                depth_mm = (depth * 1000).astype(np.uint16)  # Convert to mm
                 cv2.imwrite(depth_path, depth_mm)
 
             # Generate and save metadata
@@ -617,7 +713,8 @@ class _FlinkWriterUtility:
 
                 flink_metadata: dict = obj_mesh.get_cp("flink_metadata")
 
-                assert flink_metadata["obj_id"] == inst_idx_2_obj_id_map[inst_idx], f"Object id mismatch, expected {inst_idx_2_obj_id_map[inst_idx]}, but got {flink_metadata['obj_id']}"
+                assert flink_metadata["obj_id"] == inst_idx_2_obj_id_map[
+                    inst_idx], f"Object id mismatch, expected {inst_idx_2_obj_id_map[inst_idx]}, but got {flink_metadata['obj_id']}"
 
                 annotation = _FlinkWriterUtility.create_annotation_info(
                     inst_idx_2_obj_id_map[inst_idx],
