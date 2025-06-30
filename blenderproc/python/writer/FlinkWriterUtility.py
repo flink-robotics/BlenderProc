@@ -343,6 +343,42 @@ def is_object_all_within_view(camera: bpy.types.Object, obj: bpy.types.Object, D
     return True
 
 
+def is_obj_outside_rollcage(obj: bpy.types.Object, rollcage: MeshObject, margin: float = 0.01, min_z_clearance: float = 0.05) -> bool:
+    """
+    Returns True if the object is completely outside the rollcage volume.
+    Combines bounding box corners and object center for robustness.
+    """
+    rollcage_obj = rollcage.blender_obj
+    obj = obj if isinstance(obj, bpy.types.Object) else obj.blender_obj
+
+    # World-space rollcage bounds
+    rollcage_bb = [rollcage_obj.matrix_world @ Vector(corner) for corner in rollcage_obj.bound_box]
+    rollcage_min = Vector((min(v[i] for v in rollcage_bb) for i in range(3)))
+    rollcage_max = Vector((max(v[i] for v in rollcage_bb) for i in range(3)))
+
+    # Object bounding box corners
+    obj_bb = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+
+    # Check if any corner is clearly inside all axes
+    for corner in obj_bb:
+        x_inside = rollcage_min.x - margin <= corner.x <= rollcage_max.x + margin
+        y_inside = rollcage_min.y - margin <= corner.y <= rollcage_max.y + margin
+        z_inside = corner.z >= (rollcage_min.z + min_z_clearance)
+        if x_inside and y_inside and z_inside:
+            return False  # At least one corner is clearly inside volume
+
+    # Fallback: check center of mass
+    center = obj.matrix_world @ obj.location
+    cx_inside = rollcage_min.x - margin <= center.x <= rollcage_max.x + margin
+    cy_inside = rollcage_min.y - margin <= center.y <= rollcage_max.y + margin
+    cz_inside = center.z >= (rollcage_min.z + min_z_clearance)
+    if cx_inside and cy_inside and cz_inside:
+        return False
+
+    return True  # Fully outside
+
+
+
 def binary_mask_to_rle(binary_mask: np.ndarray, bbox: List[int]) -> List[int]:
     """Converts a binary mask to COCOs run-length encoding (RLE) format. Instead of outputting
     a mask image, you give a list of start pixels and how many pixels after each of those
@@ -503,10 +539,12 @@ def apply_depth_noise(depth: np.ndarray, noise_p1: float = 0.05, noise_p2: float
 def write_flink(output_dir: str,
                 instance_segmaps: List[np.ndarray],
                 instance_attribute_maps: List[dict],
+                rollcage: bpy.types.Object,
                 depths: Optional[List[np.ndarray]] = None, colors: Optional[List[np.ndarray]] = None,
                 color_file_format: str = "PNG", dataset: str = "", noisy_depth: dict | None = None,
                 jpg_quality: int = 95,
-                camera_id: str = "CAMID", tags: List[str] | List[List[str]] = []) -> None:
+                camera_id: str = "CAMID",
+                tags: List[str] | List[List[str]] = []) -> None:
     """ Writes images, depth maps, labels and metadata in the Flink dataset format.
 
     :param output_dir: Path to the output directory.
@@ -573,8 +611,8 @@ def write_flink(output_dir: str,
             bpy.context.scene.frame_set(frame_id)
 
             # Generate timestamp-based filename
-            timestamp = f"{frame_id:012d}"
-            filename_stem = f"{camera_id}_{timestamp}"
+            timestamp = time.time()
+            filename_stem = f"{frame_id:012d}_{timestamp}"
 
             # Save color image
             if colors is not None:
@@ -602,15 +640,13 @@ def write_flink(output_dir: str,
                 depth_idx = frame_id - bpy.context.scene.frame_start
                 depth = depths[depth_idx]
                 if noisy_depth is not None:
-                    depth = apply_depth_noise(
-                        depth, **noisy_depth)
+                    depth = apply_depth_noise(depth, **noisy_depth)
                     # depth = add_gaussian_shifts(depth)
                 depth[depth > 1e2] = 0    # set invalid depth to 0
                 # Convert depth to uint16 PNG
                 # Convert to mm
                 depth_mm = (depth * 1000).astype(np.uint16)
-                depth_path = os.path.join(
-                    dataset_dir, 'depth', f"{filename_stem}.png")
+                depth_path = os.path.join(dataset_dir, 'depth', f"{filename_stem}.png")
                 cv2.imwrite(depth_path, depth_mm)
 
             # Generate and save metadata
@@ -620,9 +656,8 @@ def write_flink(output_dir: str,
             _FlinkWriterUtility.write_json(metadata_path, metadata)
 
             labels = _FlinkWriterUtility.get_frame_labels(
-                instance_segmaps[frame_id], instance_attribute_maps[frame_id], scene_objects, pickability_info_cache)
-            labels_path = os.path.join(
-                dataset_dir, 'labels', f"{filename_stem}.json")
+                instance_segmaps[frame_id], instance_attribute_maps[frame_id], scene_objects, pickability_info_cache, rollcage)
+            labels_path = os.path.join(dataset_dir, 'labels', f"{filename_stem}.json")
             _FlinkWriterUtility.write_json(labels_path, labels)
 
 
@@ -672,7 +707,7 @@ class _FlinkWriterUtility:
         }
 
     @staticmethod
-    def get_frame_labels(inst_segmap: np.ndarray, inst_attribute_map: dict, objs: List[MeshObject], pickability_info_cache: Dict[int, Dict[str, str]]):
+    def get_frame_labels(inst_segmap: np.ndarray, inst_attribute_map: dict, objs: List[MeshObject], pickability_info_cache: Dict[int, Dict[str, str]], rollcage: bpy.types.Object):
         """Generates coco annotations for images
 
         :param inst_segmap: instance segmentation map
@@ -721,7 +756,8 @@ class _FlinkWriterUtility:
                     flink_metadata["category_id"],
                     binary_inst_mask,
                     obj_mesh,
-                    pickability_info_cache
+                    pickability_info_cache,
+                    rollcage
                 )
                 annotations.append(annotation)
 
@@ -732,14 +768,18 @@ class _FlinkWriterUtility:
         return flink_labels
 
     @staticmethod
-    def get_pickability_info(obj_id: int, obj_mesh: MeshObject, cached_pickability_info: Dict[int, Dict[str, str]]) -> Dict[str, str]:
+    def get_pickability_info(obj_id: int, obj_mesh: MeshObject, cached_pickability_info: Dict[int, Dict[str, str]], rollcage: bpy.types.Object) -> Dict[str, str]:
         """Returns pickability info for an object"""
         if obj_id in cached_pickability_info:
             print(f"obj {obj_id} pickability info already cached")
             return cached_pickability_info[obj_id]
 
         time_start = time.time()
-        if is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
+        if is_obj_outside_rollcage(obj_mesh.blender_obj, rollcage):
+            cached_pickability_info[obj_id] = {
+                "blenderproc": "difficult",
+            }
+        elif is_object_pickable(obj_mesh.blender_obj, DEBUG=False):
             cached_pickability_info[obj_id] = {
                 "blenderproc": "free",
             }
@@ -753,7 +793,7 @@ class _FlinkWriterUtility:
         return cached_pickability_info[obj_id]
 
     @staticmethod
-    def create_annotation_info(object_id: int, category_id: str, binary_mask: np.ndarray, obj_mesh: MeshObject, pickability_info_cache: Dict[int, Dict[str, str]]) -> Optional[Dict[str, Union[str, int]]]:
+    def create_annotation_info(object_id: int, category_id: str, binary_mask: np.ndarray, obj_mesh: MeshObject, pickability_info_cache: Dict[int, Dict[str, str]], rollcage: bpy.types.Object) -> Optional[Dict[str, Union[str, int]]]:
         """Creates info section of coco annotation
 
         :param category_id: name of the category
@@ -787,7 +827,7 @@ class _FlinkWriterUtility:
             bpy.context.scene.camera, obj_mesh.blender_obj)
 
         pick_class = _FlinkWriterUtility.get_pickability_info(
-            object_id, obj_mesh, pickability_info_cache)
+            object_id, obj_mesh, pickability_info_cache, rollcage)
 
         annotation_info: Dict[str, Union[str, int]] = {
             "category_id": category_id,
